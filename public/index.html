@@ -1,0 +1,56 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="description" content="CustomProxy search engine with modern UI, autocomplete, account login, and admin dashboard." />
+  <title>CustomProxy Search</title>
+  <link rel="stylesheet" href="/css/styles.css" />
+</head>
+<body>
+  <div class="page-shell">
+    <header class="site-header">
+      <div class="logo-row">
+        <div class="brand-mark">C</div>
+        <div class="brand-copy">
+          <h1>CustomProxy</h1>
+          <p>Search everything with style.</p>
+        </div>
+      </div>
+      <nav class="top-nav">
+        <a href="/login">Login</a>
+        <a href="/signup">Sign Up</a>
+        <a href="/admin">Admin</a>
+        <button id="theme-toggle" class="pill">Dark Mode</button>
+      </nav>
+    </header>
+
+    <main class="hero-section">
+      <div class="hero-copy">
+        <h2>Search the web instantly.</h2>
+        <p>Fast, clean, and modern search engine experience.</p>
+      </div>
+
+      <form id="search-form" class="search-form" action="/search" method="get">
+        <div class="input-group">
+          <span class="search-icon">🔎</span>
+          <input id="search-input" name="q" type="search" placeholder="Search anything..." autocomplete="off" />
+          <button id="voice-button" type="button" class="voice-button" aria-label="Voice search">🎙️</button>
+        </div>
+        <div id="suggestion-panel" class="suggestion-panel"></div>
+        <div class="button-row">
+          <button type="submit" class="primary-btn">Google Search</button>
+          <button id="lucky-button" type="button" class="secondary-btn">I'm Feeling Lucky</button>
+        </div>
+      </form>
+
+      <section class="recent-section">
+        <h3>Recent searches</h3>
+        <div id="recent-list" class="recent-list"></div>
+      </section>
+    </main>
+  </div>
+
+  <script src="/js/main.js"></script>
+</body>
+</html>

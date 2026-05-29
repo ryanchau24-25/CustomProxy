@@ -1,0 +1,115 @@
+const searchInput = document.querySelector('#search-input');
+const suggestionPanel = document.querySelector('#suggestion-panel');
+const recentList = document.querySelector('#recent-list');
+const themeToggle = document.querySelector('#theme-toggle');
+const luckyButton = document.querySelector('#lucky-button');
+const voiceButton = document.querySelector('#voice-button');
+
+async function loadRecentSearches() {
+  if (!recentList) return;
+  try {
+    const res = await fetch('/api/search/recent');
+    const data = await res.json();
+    const items = data.recent || [];
+    recentList.innerHTML = items.length
+      ? items.map((item) => `<button class="recent-chip" type="button" data-query="${item.query}">${item.query}</button>`).join('')
+      : '<p class="muted-text">No recent searches yet.</p>';
+
+    recentList.querySelectorAll('.recent-chip').forEach((chip) => {
+      chip.addEventListener('click', () => {
+        const query = chip.dataset.query;
+        window.location.href = `/search?q=${encodeURIComponent(query)}`;
+      });
+    });
+  } catch (error) {
+    console.error('Recent searches load failed', error);
+  }
+}
+
+async function loadSuggestions(query) {
+  if (!suggestionPanel) return;
+  if (!query.trim()) {
+    suggestionPanel.innerHTML = '';
+    return;
+  }
+
+  try {
+    const res = await fetch(`/api/search/suggestions?q=${encodeURIComponent(query)}`);
+    const data = await res.json();
+    suggestionPanel.innerHTML = data.suggestions
+      .map((text) => `<button class="suggestion-pill" type="button">${text}</button>`)
+      .join('');
+
+    suggestionPanel.querySelectorAll('.suggestion-pill').forEach((pill) => {
+      pill.addEventListener('click', () => {
+        searchInput.value = pill.textContent;
+        suggestionPanel.innerHTML = '';
+      });
+    });
+  } catch (error) {
+    console.error('Unable to load suggestions:', error);
+  }
+}
+
+function activateTheme() {
+  const isDark = localStorage.getItem('theme') === 'dark';
+  document.documentElement.classList.toggle('dark-mode', isDark);
+  if (themeToggle) themeToggle.textContent = isDark ? 'Light Mode' : 'Dark Mode';
+}
+
+function toggleTheme() {
+  const isDark = !document.documentElement.classList.contains('dark-mode');
+  localStorage.setItem('theme', isDark ? 'dark' : 'light');
+  activateTheme();
+}
+
+async function feelingLucky() {
+  const query = searchInput.value.trim();
+  if (!query) return;
+  try {
+    const res = await fetch(`/api/search/lucky?q=${encodeURIComponent(query)}`);
+    const data = await res.json();
+    if (data.result && data.result.url) {
+      window.location.href = data.result.url;
+    }
+  } catch (error) {
+    console.error('Lucky search failed:', error);
+  }
+}
+
+function supportVoiceSearch() {
+  const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if (!SpeechRecognition || !voiceButton) {
+    voiceButton?.setAttribute('title', 'Voice search unavailable');
+    return;
+  }
+
+  const recognition = new SpeechRecognition();
+  recognition.interimResults = false;
+  recognition.lang = 'en-US';
+  recognition.addEventListener('result', (event) => {
+    const transcript = event.results[0][0].transcript;
+    searchInput.value = transcript;
+    loadSuggestions(transcript);
+  });
+
+  voiceButton.addEventListener('click', () => {
+    recognition.start();
+  });
+}
+
+if (searchInput) {
+  searchInput.addEventListener('input', () => loadSuggestions(searchInput.value));
+}
+
+if (themeToggle) {
+  themeToggle.addEventListener('click', toggleTheme);
+}
+
+if (luckyButton) {
+  luckyButton.addEventListener('click', feelingLucky);
+}
+
+supportVoiceSearch();
+activateTheme();
+loadRecentSearches();

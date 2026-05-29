@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="description" content="CustomProxy search results page with pagination and modern card layout." />
+  <title>Search results | CustomProxy</title>
+  <link rel="stylesheet" href="/css/styles.css" />
+</head>
+<body>
+  <div class="page-shell">
+    <header class="search-header">
+      <a class="home-link" href="/">CustomProxy</a>
+      <form id="search-form" class="search-form search-page-form" action="/search" method="get">
+        <div class="input-group">
+          <span class="search-icon">🔎</span>
+          <input id="search-input" name="q" type="search" placeholder="Search anything..." autocomplete="off" />
+        </div>
+      </form>
+      <nav class="top-nav top-nav-small">
+        <a href="/login">Login</a>
+        <a href="/signup">Sign Up</a>
+      </nav>
+    </header>
+
+    <main class="results-page">
+      <div class="results-summary" id="results-summary"></div>
+      <div id="results-container" class="results-container"></div>
+      <div id="pagination-controls" class="pagination-controls"></div>
+    </main>
+  </div>
+
+  <script src="/js/search.js"></script>
+</body>
+</html>

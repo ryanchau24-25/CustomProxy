@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="description" content="Login to CustomProxy to save searches and access the admin dashboard." />
+  <title>Login | CustomProxy</title>
+  <link rel="stylesheet" href="/css/styles.css" />
+</head>
+<body>
+  <div class="auth-shell">
+    <div class="auth-card">
+      <h2>Welcome back</h2>
+      <p>Login to access recent searches and admin tools.</p>
+      <form id="login-form" class="auth-form">
+        <label>Email</label>
+        <input id="email" type="email" required />
+        <label>Password</label>
+        <input id="password" type="password" required />
+        <button type="submit" class="primary-btn">Login</button>
+      </form>
+      <p class="auth-note">New here? <a href="/signup">Create an account</a></p>
+      <p id="auth-error" class="auth-error"></p>
+    </div>
+  </div>
+
+  <script src="/js/auth.js"></script>
+</body>
+</html>
