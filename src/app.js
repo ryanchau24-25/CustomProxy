@@ -56,6 +56,17 @@ app.use('/api/history', historyRoutes);
 app.use('/proxy', proxyRoutes);
 
 // main reverse proxy service that handles full proxying at /service/*
+// Log requests that look like Google-internal absolute paths (they should be proxied)
+app.use((req, res, next) => {
+  try{
+    if(/^\/(?:async|search|complete|gen_204|client_204|xjs)/i.test(req.path) || /^\/gen_204/i.test(req.path)){
+      console.info('[Proxy][incoming-root] request path=', req.path, 'referer=', req.get('referer'));
+    }
+  }catch(e){}
+  next();
+});
+
+// main reverse proxy service that handles full proxying at /service/*
 app.use('/service', serviceProxy);
 
 app.get(['/', '/login', '/signup', '/search', '/admin', '/history', '/bookmarks', '/blank'], (req, res) => {

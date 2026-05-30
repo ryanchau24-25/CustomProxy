@@ -23,6 +23,7 @@ const PROXY_RUNTIME = `
   function shouldProxy(value){
     if(!value || typeof value !== 'string') return false;
     if(value.startsWith(proxyPrefix)) return false;
+    if(value === '/service' || value === '/service/' || value.startsWith('/service/?target=')) return false;
     if(specialSchemes.test(value)) return false;
     return true;
   }
@@ -119,6 +120,37 @@ const PROXY_RUNTIME = `
     return originalSetAttribute.call(this, name, value);
   };
 
+  // Intercept form submissions to ensure GET parameters are encoded inside the proxied target.
+  document.addEventListener('submit', function(ev){
+    try{
+      const form = ev.target;
+      if(!form || form.__proxy_submitting) return;
+      const method = (form.method || 'GET').toUpperCase();
+      const actionAttr = form.getAttribute('action') || location.href;
+      const absolute = new URL(actionAttr, currentTargetUrl || location.href);
+
+      if(method === 'GET'){
+        ev.preventDefault();
+        const fd = new FormData(form);
+        const params = new URLSearchParams(absolute.search);
+        for(const [k,v] of fd.entries()){
+          params.append(k, v);
+        }
+        absolute.search = params.toString();
+        location.assign(proxyPrefix + encodeURIComponent(absolute.href));
+        return;
+      }
+
+      // For POST (and others), rewrite the action to a proxied absolute target and submit normally.
+      const proxied = proxyPrefix + encodeURIComponent(absolute.href);
+      form.__proxy_submitting = true;
+      form.setAttribute('action', proxied);
+      // Allow native submit to continue; defer actual submit to avoid re-entrant listener
+      setTimeout(() => { try{ form.submit(); }catch(e){} }, 0);
+      ev.preventDefault();
+    }catch(e){/* ignore */}
+  }, true);
+
   if(navigator.serviceWorker){
     const register = navigator.serviceWorker.register.bind(navigator.serviceWorker);
     navigator.serviceWorker.register = function(scriptURL, options){
@@ -170,7 +202,17 @@ function isDataOrSpecialScheme(value){
 }
 
 function makeAbsolute(base, relative){
-  try { return new URL(relative, base).href; } catch (err) { return relative; }
+  try {
+    if(typeof relative === 'string'){
+      // Preserve proxy-relative links so our own /service/?target=... URLs do not
+      // get resolved against the upstream origin and become invalid.
+      if(relative.startsWith(PROXY_PATH)) return relative;
+      if(relative.startsWith('/')){
+        return new URL(relative, new URL(base).origin).href;
+      }
+    }
+    return new URL(relative, base).href;
+  } catch (err) { return relative; }
 }
 
 function buildProxyUrl(target){
@@ -179,16 +221,92 @@ function buildProxyUrl(target){
 
 function normalizeTarget(raw){
   const cleaned = raw.trim();
-  if(/^(?:\/\/)/.test(cleaned)) return `https:${cleaned}`;
-  if(/^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(cleaned)) return cleaned;
-  return `https://${cleaned}`;
+  let target = cleaned;
+  if(/^(?:\/\/)/.test(cleaned)) target = `https:${cleaned}`;
+  else if(/^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(cleaned)) target = cleaned;
+  else target = `https://${cleaned}`;
+
+  try{
+    const url = new URL(target);
+    if(url.hostname === 'google.com'){
+      url.hostname = 'www.google.com';
+      return url.href;
+    }
+    return url.href;
+  }catch(e){
+    return target;
+  }
 }
 
 function rewriteAttribute($, element, attr, baseUrl){
-  const value = $(element).attr(attr);
+  let value = $(element).attr(attr);
   if(!value || isDataOrSpecialScheme(value) || value.startsWith('#')) return;
-  const absolute = makeAbsolute(baseUrl, value);
-  $(element).attr(attr, buildProxyUrl(absolute));
+
+  const extractInnerTarget = (candidate) => {
+    try{
+      const u = new URL(candidate, baseUrl);
+      const inner = u.searchParams.get('target') || u.searchParams.get('url');
+      return inner || null;
+    }catch(e){ return null; }
+  };
+
+  // If the attribute already references our proxy (relative or absolute),
+  // try to extract the inner target and rewrite to a single proxied target
+  if(value.startsWith(PROXY_PATH) || value.includes(`${PROXY_PATH}/?target=`) || value.includes(`${PROXY_PATH}/${PROXY_QUERY}`)){
+    const absoluteCandidate = makeAbsolute(baseUrl, value);
+    const inner = extractInnerTarget(absoluteCandidate);
+    if(inner){
+      try{
+        const decoded = decodeURIComponent(inner);
+        const newUrl = buildProxyUrl(normalizeTarget(decoded));
+        // Log rewrites that involve Google targets for tracing
+        try{ if(String(decoded).includes('google.')) console.info('[Proxy][rewrite] tag=', element.tagName, 'attr=', attr, 'before=', value, 'after=', newUrl, 'base=', baseUrl); }catch(e){}
+        $(element).attr(attr, newUrl);
+        return;
+      }catch(e){}
+    }
+
+    // If we couldn't extract an inner target, fix bare proxy paths instead of leaving malformed /service/ values.
+    if(value === PROXY_PATH || value === `${PROXY_PATH}/`){
+      const fallback = buildProxyUrl(baseUrl);
+      console.warn('[Proxy][rewrite] malformed proxy path corrected', { tag: element.tagName, attr, before: value, after: fallback, base: baseUrl });
+      $(element).attr(attr, fallback);
+      return;
+    }
+
+    // If this was a proxied path but we couldn't recover a valid inner target,
+    // leave it alone to avoid double wrap, but log the bad path for investigation.
+    console.warn('[Proxy][rewrite] unresolved proxy path left unchanged', { tag: element.tagName, attr, value, base: baseUrl });
+    return;
+  }
+
+  // Log and trace server-side rewrites for Google-internal relative paths
+  try{
+    if(/^\/(?:async|search|complete|gen_204|client_204|xjs)/i.test(value)){
+      console.info('[Proxy][rewrite-debug] found-relative', { tag: element.tagName, attr, before: value, base: baseUrl });
+    }
+  }catch(e){}
+
+  // Compute absolute URL (resolves relative URLs), and if that absolute
+  // itself contains a proxied inner target, unwrap it first to avoid nesting.
+  let absolute = makeAbsolute(baseUrl, value);
+  const innerFromAbs = extractInnerTarget(absolute);
+  if(innerFromAbs){
+    try{ absolute = normalizeTarget(decodeURIComponent(innerFromAbs)); }
+    catch(e){}
+  }
+
+  // Finally set attribute to proxied absolute (including any existing query)
+  const proxied = buildProxyUrl(absolute);
+  if(proxied === `${PROXY_PATH}/${PROXY_QUERY}` || proxied === `${PROXY_PATH}/?target=`){
+    console.error('[Proxy][rewrite] Proxy generated empty target URL', { tag: element.tagName, attr, before: value, absolute, proxied, base: baseUrl });
+  }
+  try{
+    if(/^\/(?:async|search|complete|gen_204|client_204|xjs)/i.test(value) || String(absolute).includes('google.')){
+      console.info('[Proxy][rewrite-debug] resolved', { tag: element.tagName, attr, before: value, absolute, proxied, base: baseUrl });
+    }
+  }catch(e){}
+  $(element).attr(attr, proxied);
 }
 
 function rewriteSrcSet(value, baseUrl){
@@ -199,7 +317,13 @@ function rewriteSrcSet(value, baseUrl){
       const parts = item.trim().split(/\s+/);
       const url = parts[0];
       if(isDataOrSpecialScheme(url)) return item;
-      const absolute = makeAbsolute(baseUrl, url);
+      // unwrap nested proxied targets if present
+      let absolute = makeAbsolute(baseUrl, url);
+      try{
+        const u = new URL(absolute);
+        const inner = u.searchParams.get('target') || u.searchParams.get('url');
+        if(inner) absolute = normalizeTarget(decodeURIComponent(inner));
+      }catch(e){}
       return [buildProxyUrl(absolute), parts.slice(1).join(' ')].filter(Boolean).join(' ');
     })
     .join(', ');
@@ -278,10 +402,23 @@ function rewriteHTML(html, originUrl){
   const $ = cheerio.load(html, { decodeEntities: false });
   const baseUrl = originUrl;
 
-  if($('base').length){
-    $('base').attr('href', buildProxyUrl(baseUrl));
-  } else {
-    $('head').prepend(`<base href="${buildProxyUrl(baseUrl)}">`);
+  // Inject a base href that points to the upstream origin (not the proxied URL).
+  // This ensures root-relative URLs (e.g. `/async/hpba`) resolve against the
+  // upstream host (https://google.com) before we proxify them server-side.
+  try{
+    const originBase = new URL(baseUrl).origin + '/';
+    if(String(baseUrl).includes('google.')) console.info('[Proxy][base] set upstream-origin-base=', originBase, 'origUrl=', baseUrl);
+    if($('base').length){
+      $('base').attr('href', originBase);
+    } else {
+      $('head').prepend(`<base href="${originBase}">`);
+    }
+  }catch(e){
+    // fallback to proxied base if origin parse fails
+    const baseHref = buildProxyUrl(baseUrl);
+    try{ if(String(baseUrl).includes('google.')) console.info('[Proxy][base] fallback base href=', baseHref, 'origin=', baseUrl); }catch(e){}
+    if($('base').length) $('base').attr('href', baseHref);
+    else $('head').prepend(`<base href="${baseHref}">`);
   }
 
   const rewrites = [
@@ -417,8 +554,120 @@ function rewriteSetCookie(cookieStr, proxySecure){
 async function parseTarget(req){
   const incoming = new URL(req.url, `${req.protocol}://${req.get('host')}`);
   const rawTarget = incoming.searchParams.get('target') || incoming.searchParams.get('url') || req.path.replace(/^\/service\/?/i, '');
+  // Log parsed incoming URL and query params for investigation
+  try{
+    const params = {};
+    for(const [k,v] of incoming.searchParams.entries()) params[k] = v;
+    console.info('[Proxy][parseTarget] incomingUrl=', incoming.href, 'searchParams=', params, 'rawTarget=', rawTarget);
+  }catch(e){}
   if(!rawTarget) return null;
-  return normalizeTarget(decodeURIComponent(rawTarget));
+  // If rawTarget is just a leading slash or path (e.g. '/'), treat as no target
+  if(rawTarget === '/' || rawTarget.trim() === '' || rawTarget.startsWith('/')){
+    console.info('[Proxy][parseTarget] rawTarget is empty or a path; attempting referer/cookie fallback', rawTarget);
+    // Try to recover target from Referer (browser may submit to /service/?q=... losing target)
+    try{
+      const ref = req.get('referer') || req.headers.referer || '';
+      if(ref){
+        const refUrl = new URL(ref);
+        const refTargetRaw = refUrl.searchParams.get('target') || refUrl.searchParams.get('url');
+        if(refTargetRaw){
+          const refDecoded = decodeURIComponent(refTargetRaw);
+          let refNormalized = normalizeTarget(refDecoded);
+          // merge outer params (incoming) into refNormalized
+          try{
+            const outerParams = incoming.searchParams;
+            const t = new URL(refNormalized);
+            let merged = false;
+            for(const [k,v] of outerParams.entries()){
+              if(k === 'target' || k === 'url') continue;
+              if(!t.searchParams.has(k)){
+                t.searchParams.append(k, v);
+                merged = true;
+              }
+            }
+            if(merged){
+              console.info('[Proxy][parseTarget] refererFallback mergedOuterParams', { before: refNormalized, after: t.href });
+              refNormalized = t.href;
+            }
+          }catch(e){ console.error('[Proxy][parseTarget] referer merge failed', e && e.stack); }
+          console.info('[Proxy][parseTarget] refererFallback decoded=', refDecoded, 'normalized=', refNormalized);
+          return refNormalized;
+        }
+      }
+    }catch(e){ console.error('[Proxy][parseTarget] referer fallback failed', e && e.stack); }
+    // Try cookie fallback: look for proxy_target cookie set on previous HTML responses
+    try{
+      const cookieHeader = req.headers && req.headers.cookie;
+      if(cookieHeader){
+        const match = cookieHeader.match(/(?:^|;\s*)proxy_target=([^;]+)/);
+        if(match && match[1]){
+          try{
+            const decoded = decodeURIComponent(match[1]);
+            const normalized = normalizeTarget(decoded);
+            console.info('[Proxy][parseTarget] cookieFallback found proxy_target=', normalized);
+            // merge outer params into normalized as earlier
+            try{
+              const outerParams = incoming.searchParams;
+              const t = new URL(normalized);
+              let merged = false;
+              for(const [k,v] of outerParams.entries()){
+                if(k === 'target' || k === 'url') continue;
+                if(!t.searchParams.has(k)){
+                  t.searchParams.append(k, v);
+                  merged = true;
+                }
+              }
+              if(merged){
+                console.info('[Proxy][parseTarget] cookieFallback mergedOuterParams', { before: normalized, after: t.href });
+                return t.href;
+              }
+            }catch(e){ /* ignore merge errors */ }
+            return normalized;
+          }catch(e){}
+        }
+      }
+    }catch(e){ console.error('[Proxy][parseTarget] cookie fallback failed', e && e.stack); }
+    return null;
+  }
+  let decoded;
+  try{
+    decoded = decodeURIComponent(rawTarget);
+  }catch(e){
+    decoded = rawTarget;
+  }
+  // If decoding yields a path-only value like '/', treat as no target
+  if(decoded === '/' || decoded.trim() === '' || decoded.startsWith('/')){
+    console.info('[Proxy][parseTarget] decoded rawTarget is path-only; returning null', decoded);
+    return null;
+  }
+  let normalized = normalizeTarget(decoded);
+
+  // If there are additional query params on the outer proxied URL (e.g. &q=cats),
+  // merge them into the decoded target's query string so browser-applied params
+  // don't get lost outside the encoded `target` parameter.
+  try{
+    const outerParams = new URL(req.url, `${req.protocol}://${req.get('host')}`).searchParams;
+    const t = new URL(normalized);
+    let merged = false;
+    for(const [k,v] of outerParams.entries()){
+      if(k === 'target' || k === 'url') continue;
+      // Append only if upstream doesn't already have the param
+      if(!t.searchParams.has(k)){
+        t.searchParams.append(k, v);
+        merged = true;
+      }
+    }
+    if(merged){
+      const before = normalized;
+      normalized = t.href;
+      console.info('[Proxy][parseTarget] mergedOuterParams into target', { before, after: normalized });
+    }
+  }catch(e){
+    console.error('[Proxy][parseTarget] merge outer params failed', e && e.stack);
+  }
+
+  console.info('[Proxy][parseTarget] decodedTarget=', decoded, 'normalizedTarget=', normalized);
+  return normalized;
 }
 
 router.all('/*', async (req, res) => {
@@ -440,8 +689,17 @@ router.all('/*', async (req, res) => {
     headers['accept-language'] = headers['accept-language'] || 'en-US,en;q=0.9';
     headers['user-agent'] = headers['user-agent'] || 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36';
 
-    const jar = await getCookieJar(req);
-    const cookieHeader = await new Promise((resolve) => jar.getCookieString(targetUrl.href, {}, (err, cookie) => resolve(cookie || '')));
+        
+    let jar = await getCookieJar(req);
+    let cookieHeader = '';
+    try{
+      cookieHeader = await new Promise((resolve) => jar.getCookieString(targetUrl.href, {}, (err, cookie) => resolve(cookie || '')));
+    }catch(e){
+      try{
+        jar = await getCookieJar(req);
+        cookieHeader = await new Promise((resolve) => jar.getCookieString(targetUrl.href, {}, (err, cookie) => resolve(cookie || '')));
+      }catch(e2){}
+    }
     if(cookieHeader) headers.cookie = cookieHeader;
 
     const gotOptions = {
@@ -459,7 +717,17 @@ router.all('/*', async (req, res) => {
     const upstream = got.stream(targetUrl.href, gotOptions);
 
     upstream.on('error', (error) => {
-      if(!res.headersSent) res.status(502).send('Upstream request failed');
+      console.error('[Proxy][upstream error]', {
+        message: error && error.message,
+        target: targetUrl.href,
+        rewritten: buildProxyUrl(targetUrl.href),
+        stack: error && error.stack,
+      });
+      if(!res.headersSent) {
+        try{
+          res.status(502).send(`Upstream request failed for target=${targetUrl.href}`);
+        }catch(e){}
+      }
       upstream.destroy();
     });
 
@@ -470,9 +738,15 @@ router.all('/*', async (req, res) => {
 
         if(responseHeaders.location){
           try{
+            // Log original redirect from upstream
+            console.info('[Proxy][redirect] original-location=', responseHeaders.location, 'for target=', targetUrl.href);
             const absoluteLocation = new URL(responseHeaders.location, targetUrl.href).href;
-            responseHeaders.location = buildProxyUrl(absoluteLocation);
-          }catch(e){}
+            const rewrittenLocation = buildProxyUrl(absoluteLocation);
+            responseHeaders.location = rewrittenLocation;
+            console.info('[Proxy][redirect] rewritten-location=', rewrittenLocation, 'absolute=', absoluteLocation);
+          }catch(e){
+            console.error('[Proxy][redirect] location rewrite failed', { target: targetUrl.href, location: responseHeaders.location, error: e && e.stack });
+          }
         }
 
         const setCookies = proxRes.headers['set-cookie'];
@@ -485,6 +759,20 @@ router.all('/*', async (req, res) => {
             }catch(e){}
           }
         }
+        // Ensure downstream clients receive a cookie storing the proxy's current target
+        // Only set this cookie for HTML navigational responses to avoid API/XHR endpoints
+        try{
+          const upstreamContentType = (proxRes.headers['content-type'] || '').toLowerCase();
+          if(/text\/html/i.test(upstreamContentType)){
+            const proxyCookie = `proxy_target=${encodeURIComponent(targetUrl.href)}; Path=/; SameSite=Lax`;
+            if(responseHeaders['set-cookie']){
+              if(Array.isArray(responseHeaders['set-cookie'])) responseHeaders['set-cookie'].push(proxyCookie);
+              else responseHeaders['set-cookie'] = [responseHeaders['set-cookie'], proxyCookie];
+            } else {
+              responseHeaders['set-cookie'] = [proxyCookie];
+            }
+          }
+        }catch(e){ console.error('[Proxy] set proxy_target cookie failed', e && e.stack); }
 
         const contentEncoding = (proxRes.headers['content-encoding'] || '').toLowerCase().trim();
         const contentType = proxRes.headers['content-type'] || '';
@@ -553,6 +841,24 @@ router.all('/*', async (req, res) => {
             }
 
             const text = decodedBuffer.toString('utf8');
+            // Detect Google suggestion responses which begin with a strange prefix like ")]}'"
+            try{
+              const trimmed = text.trimStart();
+              if(/^\)\]\}'/.test(trimmed)){
+                console.info('[Proxy][suggestion-detected]', {
+                  incomingUrl: req.url,
+                  method: req.method,
+                  target: targetUrl.href,
+                  statusCode: proxRes.statusCode,
+                  contentType: proxRes.headers['content-type'],
+                  contentDisposition: proxRes.headers['content-disposition'],
+                  accept: req.headers['accept'],
+                  secFetchMode: req.headers['sec-fetch-mode'],
+                  xRequestedWith: req.headers['x-requested-with'],
+                });
+              }
+            }catch(e){}
+
             let rewritten = text;
             if (isHTML) rewritten = rewriteHTML(text, targetUrl.href);
             else if (isJS) rewritten = PROXY_RUNTIME + '\n' + rewriteInlineScript(text, targetUrl.href);
