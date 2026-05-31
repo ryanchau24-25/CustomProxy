@@ -165,7 +165,7 @@ document.querySelector('#search-form')?.addEventListener('submit', (event) => {
   if (engine === 'customproxy') {
     window.location.href = `/search?q=${encodeURIComponent(query)}`;
   } else {
-    window.location.href = getSearchEngineUrl(query, engine);
+    window.location.href = `/service/?target=${encodeURIComponent(getSearchEngineUrl(query, engine))}`;
   }
 });
 
